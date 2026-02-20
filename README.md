@@ -12,7 +12,15 @@ Add viral referral loops to your SaaS product in minutes, not months.
 pip install -r requirements.txt
 ```
 
-### 2. Run the API
+### 2. Set Environment Variables
+
+```bash
+export WEBHOOK_SECRET="your-secure-random-secret-key"
+```
+
+**⚠️ Security Note:** The `WEBHOOK_SECRET` is used to verify webhook signatures and prevent unauthorized reward creation. Use a strong, random secret in production.
+
+### 3. Run the API
 
 ```bash
 python main.py
@@ -20,7 +28,7 @@ python main.py
 
 The API will start at `http://localhost:8000`
 
-### 3. Open Dashboard
+### 4. Open Dashboard
 
 Visit `http://localhost:8000` to access the admin dashboard.
 
@@ -42,7 +50,7 @@ Visit `http://localhost:8000` to access the admin dashboard.
 - `POST /api/rewards/{id}/fulfill` - Mark reward as fulfilled
 
 ### Webhooks
-- `POST /api/webhooks/track` - Track rewardable actions from your app
+- `POST /api/webhooks/track` - Track rewardable actions from your app **(requires signature)**
 
 ### Widget
 - `GET /api/widget/{campaign_id}` - Get widget configuration
@@ -102,16 +110,72 @@ Response:
 
 ### 3. Track Actions via Webhook
 
-When someone completes an action (signup, purchase, etc.):
+When someone completes an action (signup, purchase, etc.), send a webhook with an HMAC-SHA256 signature:
 
 ```bash
+# First, compute the signature (example in Python):
+# import hmac, hashlib, json
+# payload = json.dumps({"referral_code": "ABC123XY", "action_type": "signup", "metadata": {"reward_value": 50}})
+# signature = hmac.new(b"your-secret-key", payload.encode(), hashlib.sha256).hexdigest()
+
 curl -X POST http://localhost:8000/api/webhooks/track \
   -H "Content-Type: application/json" \
+  -H "X-Webhook-Signature: YOUR_COMPUTED_SIGNATURE" \
   -d '{
     "referral_code": "ABC123XY",
     "action_type": "signup",
     "metadata": {"reward_value": 50}
   }'
+```
+
+**Webhook Signature Verification:**
+
+The `/api/webhooks/track` endpoint requires an `X-Webhook-Signature` header containing an HMAC-SHA256 hash of the request body.
+
+**How to generate the signature:**
+
+```python
+import hmac
+import hashlib
+import json
+
+# Your webhook secret (same as WEBHOOK_SECRET env variable)
+secret = "your-secure-random-secret-key"
+
+# The JSON payload as a string
+payload = json.dumps({
+    "referral_code": "ABC123XY",
+    "action_type": "signup",
+    "metadata": {"reward_value": 50}
+})
+
+# Compute HMAC-SHA256 signature
+signature = hmac.new(
+    secret.encode('utf-8'),
+    payload.encode('utf-8'),
+    hashlib.sha256
+).hexdigest()
+
+print(f"X-Webhook-Signature: {signature}")
+```
+
+```javascript
+// Node.js example
+const crypto = require('crypto');
+
+const secret = 'your-secure-random-secret-key';
+const payload = JSON.stringify({
+  referral_code: 'ABC123XY',
+  action_type: 'signup',
+  metadata: { reward_value: 50 }
+});
+
+const signature = crypto
+  .createHmac('sha256', secret)
+  .update(payload)
+  .digest('hex');
+
+console.log(`X-Webhook-Signature: ${signature}`);
 ```
 
 ### 4. Fulfill Rewards
@@ -130,58 +194,18 @@ curl -X POST http://localhost:8000/api/rewards/REWARD_ID/fulfill \
 - **SQLite** - Simple file-based database (easy to swap for PostgreSQL)
 - **SQLAlchemy** - ORM for database operations
 - **Jinja2** - Template engine for dashboard
-- **Vanilla JS** - Lightweight embeddable widget
+- **Vanilla JS** - Lightweight widget (no framework dependencies)
 
-## 📁 Project Structure
+## 🔒 Security
 
-```
-├── main.py              # FastAPI application
-├── models.py            # Database models
-├── schemas.py           # Pydantic schemas
-├── crud.py              # Database operations
-├── database.py          # Database connection
-├── templates/
-│   └── dashboard.html   # Admin dashboard
-├── static/
-│   └── widget.js        # Embeddable widget
-├── requirements.txt
-└── README.md
-```
-
-## 🛠️ Customization
-
-### Changing the Database
-
-Edit `database.py` to use PostgreSQL:
-
-```python
-SQLALCHEMY_DATABASE_URL = "postgresql://user:password@localhost/referralrewards"
-```
-
-### Styling the Widget
-
-Edit `static/widget.js` - the CSS is in the `styles` variable.
-
-### Adding Auth
-
-Add authentication to protected endpoints:
-
-```python
-from fastapi.security import HTTPBearer
-
-security = HTTPBearer()
-
-@app.post("/api/campaigns", dependencies=[Depends(security)])
-```
-
-## 📈 Next Steps
-
-1. **Add authentication** - API keys or OAuth2
-2. **Swap to PostgreSQL** - For production scale
-3. **Add email notifications** - Send updates on conversions
-4. **Analytics dashboard** - Charts and graphs
-5. **Reward templates** - Pre-built coupon/prize integrations
+- **Webhook Signature Verification**: All webhook requests must include a valid HMAC-SHA256 signature to prevent unauthorized reward creation
+- **Environment Variables**: Sensitive configuration (like `WEBHOOK_SECRET`) should be stored in environment variables
+- **Production Recommendations**:
+  - Use a cryptographically secure random string for `WEBHOOK_SECRET`
+  - Use HTTPS in production
+  - Consider rate limiting on webhook endpoints
+  - Rotate secrets periodically
 
 ## 📝 License
 
-MIT - Build something awesome!
+MIT
