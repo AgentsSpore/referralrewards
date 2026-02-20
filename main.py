@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -7,6 +7,9 @@ from typing import List, Optional
 import uvicorn
 import uuid
 from datetime import datetime
+import hmac
+import hashlib
+import os
 
 from database import get_db, engine, Base
 from schemas import (
@@ -27,6 +30,25 @@ Base.metadata.create_all(bind=engine)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+# Webhook secret for signature verification
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your-secret-key-change-in-production")
+
+
+def verify_webhook_signature(payload_body: bytes, signature_header: str) -> bool:
+    """Verify HMAC-SHA256 signature of webhook payload"""
+    if not signature_header:
+        return False
+    
+    # Compute HMAC-SHA256 hash
+    expected_signature = hmac.new(
+        WEBHOOK_SECRET.encode('utf-8'),
+        payload_body,
+        hashlib.sha256
+    ).hexdigest()
+    
+    # Compare signatures (constant-time comparison to prevent timing attacks)
+    return hmac.compare_digest(expected_signature, signature_header)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -85,7 +107,7 @@ def get_campaign_referrals(campaign_id: str, db: Session = Depends(get_db)):
 # Reward endpoints
 @app.post("/api/rewards", response_model=RewardResponse)
 def create_reward_endpoint(reward: RewardCreate, db: Session = Depends(get_db)):
-    """Create a reward for a referral"""
+    """Create a reward"""
     return create_reward(db, reward)
 
 @app.get("/api/referrals/{referral_id}/rewards", response_model=List[RewardResponse])
@@ -99,35 +121,64 @@ def fulfill_reward(reward_id: str, fulfillment_data: dict, db: Session = Depends
     reward = update_reward_fulfillment(db, reward_id, fulfillment_data)
     if not reward:
         raise HTTPException(status_code=404, detail="Reward not found")
-    return {"status": "fulfilled", "reward_id": reward_id}
+    return reward
 
 
-# Webhook endpoint for tracking actions
+# Webhook endpoint with signature verification
 @app.post("/api/webhooks/track")
-def track_action(payload: WebhookPayload, db: Session = Depends(get_db)):
-    """Webhook endpoint to track rewardable actions from external apps"""
+async def track_webhook(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_webhook_signature: Optional[str] = Header(None)
+):
+    """Track rewardable actions from your app (requires HMAC-SHA256 signature)"""
+    # Read raw body for signature verification
+    body = await request.body()
+    
+    # Verify webhook signature
+    if not verify_webhook_signature(body, x_webhook_signature):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid webhook signature. Please provide a valid X-Webhook-Signature header."
+        )
+    
+    # Parse the payload
+    try:
+        payload = WebhookPayload.model_validate_json(body)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid payload: {str(e)}")
+    
+    # Find the referral
     referral = get_referral(db, payload.referral_code)
     if not referral:
-        raise HTTPException(status_code=404, detail="Referral not found")
+        raise HTTPException(status_code=404, detail="Referral code not found")
     
-    # Create reward for the action
-    reward = create_reward(db, RewardCreate(
+    # Extract reward details from metadata
+    reward_value = payload.metadata.get("reward_value", 0)
+    reward_type = payload.metadata.get("reward_type", "credit")
+    
+    # Create reward
+    reward_data = RewardCreate(
         referral_id=referral.id,
         action_type=payload.action_type,
-        reward_type="credit",  # Default, can be customized
-        reward_value=payload.metadata.get("reward_value", 10),
-        status="pending"
-    ))
+        reward_type=reward_type,
+        reward_value=reward_value
+    )
+    reward = create_reward(db, reward_data)
+    
+    # Increment successful conversions
+    referral.successful_conversions += 1
+    db.commit()
     
     return {
-        "status": "tracked",
+        "status": "success",
+        "reward_id": reward.id,
         "referral_code": payload.referral_code,
-        "action": payload.action_type,
-        "reward_id": reward.id
+        "message": f"Reward created for {payload.action_type}"
     }
 
 
-# Widget configuration endpoint
+# Widget endpoint
 @app.get("/api/widget/{campaign_id}", response_model=WidgetConfig)
 def get_widget_config(campaign_id: str, db: Session = Depends(get_db)):
     """Get widget configuration for embedding"""
@@ -139,7 +190,6 @@ def get_widget_config(campaign_id: str, db: Session = Depends(get_db)):
         campaign_id=campaign.id,
         campaign_name=campaign.name,
         reward_description=campaign.reward_description,
-        primary_color="#6366f1",
         api_base_url="http://localhost:8000"
     )
 
